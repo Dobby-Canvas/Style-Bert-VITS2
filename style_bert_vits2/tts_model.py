@@ -5,6 +5,9 @@ import numpy as np
 import torch
 from numpy.typing import NDArray
 from pydantic import BaseModel
+import base64
+import io
+from style_bert_vits2.aivmlib.aivmlib import read_aivm_metadata
 
 from style_bert_vits2.constants import (
     DEFAULT_ASSIST_TEXT_WEIGHT,
@@ -61,6 +64,9 @@ class TTSModel:
 
         self.model_path: Path = model_path
         self.device: str = device
+
+        if self.model_path.suffix == ".aivm":
+            config_path, style_vec_path = get_config_from_aivm(self.model_path)
 
         # ハイパーパラメータの Pydantic モデルが直接指定された
         if isinstance(config_path, HyperParameters):
@@ -391,20 +397,26 @@ class TTSModelHolder:
             model_files = [
                 f
                 for f in model_dir.iterdir()
-                if f.suffix in [".pth", ".pt", ".safetensors"]
+                if f.suffix in [".pth", ".pt", ".safetensors", ".aivm"]
             ]
             if len(model_files) == 0:
                 logger.warning(f"No model files found in {model_dir}, so skip it")
                 continue
+            is_aivm_model = model_files[0].suffix == ".aivm"
             config_path = model_dir / "config.json"
-            if not config_path.exists():
+
+            if not config_path.exists() and not is_aivm_model:
                 logger.warning(
                     f"Config file {config_path} not found, so skip {model_dir}"
                 )
                 continue
             self.model_files_dict[model_dir.name] = model_files
             self.model_names.append(model_dir.name)
-            hyper_parameters = HyperParameters.load_from_json(config_path)
+
+            if is_aivm_model:
+                hyper_parameters, _ = get_config_from_aivm(model_files[0])
+            else:
+                hyper_parameters = HyperParameters.load_from_json(config_path)
             style2id: dict[str, int] = hyper_parameters.data.style2id
             styles = list(style2id.keys())
             spk2id: dict[str, int] = hyper_parameters.data.spk2id
@@ -501,3 +513,16 @@ class TTSModelHolder:
             gr.Dropdown(choices=initial_model_files, value=initial_model_files[0]),  # type: ignore
             gr.Button(interactive=False),  # For tts_button
         )
+
+
+def get_config_from_aivm(model_path: Path) -> tuple[HyperParameters, NDArray[Any]]:
+    with open(model_path, "rb") as aivm_file:
+        raw_metadata = read_aivm_metadata(aivm_file)
+
+    buffer = io.BytesIO(raw_metadata.style_vectors)
+    vectors_nd = np.load(buffer)
+
+    return (
+        HyperParameters(**raw_metadata.hyper_parameters.model_dump()),
+        vectors_nd,
+    )
